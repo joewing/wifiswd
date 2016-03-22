@@ -8,7 +8,7 @@ automatically in OpenBSD.  On startup and SIGHUP, it reads
     homenetwork wpakey homekey
     worknetwork wpakey workkey
 
-To start the daemon, run "wifiswd if0", where "if0" is the name of your
+To start the daemon, run "wifiswd -i if0", where "if0" is the name of your
 interface.
     
 

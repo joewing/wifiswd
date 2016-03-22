@@ -5,6 +5,8 @@
 #include <ctype.h>
 #include <unistd.h>
 #include <signal.h>
+#include <util.h>
+#include <syslog.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -22,12 +24,13 @@ static const char DHCP_TEMPLATE[] = "dhclient %s";
 
 static const char *ifname = "iwm0";
 static const char *config_file = "/etc/wireless.conf";
+static char foreground = 0;
 
 static volatile char should_exit = 0;
 static volatile char reload_config = 0;
 static char last_state = -1;
 
-static Network *LoadConfig()
+static Network *LoadConfig(void)
 {
     struct stat sb;
     Network *result = NULL;
@@ -112,7 +115,7 @@ static void DestroyConfig(Network *np)
     }
 }
 
-static char CheckStatus()
+static char CheckStatus(void)
 {
     size_t len;
     FILE *fp;
@@ -218,26 +221,84 @@ static void HandleHup(int sig)
     reload_config = 1;
 }
 
+static void ShowHelp(const char *name)
+{
+    fprintf(stderr, "usage: %s [options]\n", name);
+    fprintf(stderr, "options:\n");
+    fprintf(stderr, "   -c <file> The configuration file [%s]\n", config_file);
+    fprintf(stderr, "   -f        Run in foreground for debugging\n");
+    fprintf(stderr, "   -h        Display this message\n");
+    fprintf(stderr, "   -i <if>   The interface to use [%s]\n", ifname);
+}
+
 int main(int argc, char *argv[])
 {
     Network *config;
+    int ch;
 
-    if(argc != 1 && argc != 2) {
-        printf("usage: %s <if>\n", argv[0]);
-        return -1;
+    /* Parse arguments. */
+    while((ch = getopt(argc, argv, "c:fhi:")) != -1) {
+        switch(ch) {
+        case 'c':
+            config_file = optarg;
+            break;
+        case 'f':
+            foreground = 1;
+            break;
+        case 'i':
+            ifname = optarg;
+            break;
+        default:
+            ShowHelp(argv[0]);
+            return -1;
+        }
     }
-    if(argc == 2) {
-        ifname = argv[1];
-    }
 
-    signal(SIGINT, HandleTerm);
-    signal(SIGTERM, HandleTerm);
-    signal(SIGHUP, HandleHup);
-
+    /* Parse initial config. */
     config = LoadConfig();
     if(config == NULL) {
         return -1;
     }
+
+    /* Become a daemon. */
+    if(!foreground) {
+        pid_t pid;
+
+        pid = fork();
+        if(pid < 0) {
+            perror("ERROR: fork failed");
+            return -1;
+        } else if(pid > 0) {
+            return 0;
+        }
+
+        if(pidfile("wifiswd") < 0) {
+            perror("ERROR: pidfile failed");
+            return -1;
+        }
+
+        umask(0);
+
+        if(setsid() == -1) {
+            perror("ERROR: setsid failed");
+            DestroyConfig(config);
+            return -1;
+        }
+
+        if(chdir("/") < 0) {
+            perror("ERROR: chdir failed");
+            return -1;
+        }
+
+        close(STDIN_FILENO);
+        close(STDOUT_FILENO);
+        close(STDERR_FILENO);
+    }
+    signal(SIGINT, HandleTerm);
+    signal(SIGTERM, HandleTerm);
+    signal(SIGHUP, HandleHup);
+
+    /* Process until we're told to stop. */
     while(!should_exit) {
         if(reload_config) {
             DestroyConfig(config);
@@ -249,19 +310,19 @@ int main(int argc, char *argv[])
         }
         if(CheckStatus()) {
             if(last_state != 1) {
-                fprintf(stderr, "Network is up\n");
+                syslog(LOG_INFO, "Network is up");
                 last_state = 1;
             }
             sleep(1);
         } else {
             Network *np;
             if(last_state != 0) {
-                fprintf(stderr, "Network is down\n");
+                syslog(LOG_INFO, "Network is down");
                 last_state = 0;
             }
             np = Scan(config);
             if(np) {
-                fprintf(stderr, "Starting network %s\n", np->ssid);
+                syslog(LOG_INFO, "Starting network %s", np->ssid);
                 StartNetwork(np);
                 sleep(10);
             } else {
@@ -270,6 +331,7 @@ int main(int argc, char *argv[])
         }
     }
 
+    /* Normal shutdown. */
     DestroyConfig(config);
     return 0;
 }
