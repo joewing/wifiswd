@@ -7,9 +7,17 @@
 #include <signal.h>
 #include <util.h>
 #include <syslog.h>
+#include <sys/types.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
+
+#include <net/if.h>
+#include <net80211/ieee80211.h>
+#include <net80211/ieee80211_ioctl.h>
 
 typedef struct Network {
     char *ssid;
@@ -17,8 +25,6 @@ typedef struct Network {
     struct Network *next;
 } Network;
 
-static const char SCAN_TEMPLATE[] = "ifconfig %s scan";
-static const char STATUS_TEMPLATE[] = "ifconfig %s";
 static const char START_TEMPLATE[] = "ifconfig %s nwid %s %s";
 static const char DHCP_TEMPLATE[] = "dhclient %s";
 
@@ -42,17 +48,17 @@ static Network *LoadConfig(void)
     /* Map the configuration file. */
     fd = open(config_file, O_RDONLY);
     if(fd < 0) {
-        perror("ERROR: could not open config file");
+        syslog(LOG_ERR, "could not open %s", config_file);
         return NULL;
     }
     if(fstat(fd, &sb) < 0) {
-        perror("ERROR: could not read config file");
+        syslog(LOG_ERR, "could not stat %s", config_file);
         close(fd);
         return NULL;
     }
     config = mmap(NULL, sb.st_size, PROT_READ, MAP_SHARED, fd, 0);
     if(config == MAP_FAILED) {
-        perror("ERROR: could not map config file");
+        syslog(LOG_ERR, "mmap failed for %s", config_file);
         close(fd);
         return NULL;
     }
@@ -115,86 +121,100 @@ static void DestroyConfig(Network *np)
     }
 }
 
+static void SetFlag(int sock, int value)
+{
+    struct ifreq ifr;
+    int old_flags;
+    bzero(&ifr, sizeof(ifr));
+    strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
+    if(ioctl(sock, SIOCGIFFLAGS, (caddr_t)&ifr, sizeof(ifr)) < 0) {
+        syslog(LOG_WARNING, "could not read flags");
+        return;
+    }
+    old_flags = ifr.ifr_flags;
+    if(value < 0) {
+        ifr.ifr_flags &= ~-value;
+    } else {
+        ifr.ifr_flags |= value;
+    }
+    if(old_flags != ifr.ifr_flags) {
+        if(ioctl(sock, SIOCSIFFLAGS, (caddr_t)&ifr) < 0) {
+            syslog(LOG_WARNING, "could not update flags");
+            return;
+        }
+    }
+}
+
 static char CheckStatus(void)
 {
-    size_t len;
-    FILE *fp;
-    char *command;
-    char line[256];
-    char is_up;
-
-    len = strlen(ifname) + sizeof(STATUS_TEMPLATE);
-    command = malloc(len);
-    snprintf(command, len, STATUS_TEMPLATE, ifname);
-    fp = popen(command, "re");
-    if(!fp) {
-        perror("ERROR: could not scan");
-        free(command);
-        pclose(fp);
-        return 0;
+    struct ifaddrs *ifap;
+    struct ifaddrs *ap;
+    char status = 0;
+    if(getifaddrs(&ifap) < 0) {
+        syslog(LOG_WARNING, "could not determine state of %s", ifname);
+        return status;
     }
-    free(command);
-    if(fgets(line, sizeof(line), fp) == NULL) {
-        is_up = 0;
-    } else {
-        is_up = strstr(line, "UP") != NULL;
+    for(ap = ifap; ap; ap = ap->ifa_next) {
+        if(!strcmp(ifname, ap->ifa_name) && ap->ifa_data) {
+            struct if_data *ifd = (struct if_data*)ap->ifa_data;
+            status = LINK_STATE_IS_UP(ifd->ifi_link_state);
+            break;
+        }
     }
-    pclose(fp);
-    return is_up;
+    freeifaddrs(ifap);
+    return status;
 }
 
 static Network *Scan(Network *config)
 {
-    Network *result = NULL;
-    FILE *fp;
-    size_t len;
-    char *command;
-    char line[256];
+    Network *np = NULL;
+    struct ifreq ifr;
+    struct ieee80211_nodereq_all na;
+    struct ieee80211_nodereq nr[512];
+    int sock;
 
-    len = strlen(ifname) + sizeof(SCAN_TEMPLATE);
-    command = malloc(len);
-    snprintf(command, len, SCAN_TEMPLATE, ifname);
-    fp = popen(command, "re");
-    if(!fp) {
-        perror("ERROR: could not scan");
-        free(command);
-        pclose(fp);
+    sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if(sock < 0) {
+        syslog(LOG_WARNING, "could not scan (socket create failed)");
         return NULL;
     }
-    free(command);
-    while(!result) {
+
+    SetFlag(sock, IFF_UP);
+
+    bzero(&ifr, sizeof(ifr));
+    strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
+    if(ioctl(sock, SIOCS80211SCAN, (caddr_t)&ifr) != 0) {
+        syslog(LOG_WARNING, "could not start scan");
+        close(sock);
+        return NULL;
+    }
+
+    bzero(&na, sizeof(na));
+    bzero(&nr, sizeof(nr));
+    na.na_node = nr;
+    na.na_size = sizeof(nr);
+    strlcpy(na.na_ifname, ifname, sizeof(na.na_ifname));
+    if(ioctl(sock, SIOCG80211ALLNODES, &na) != 0) {
+        syslog(LOG_WARNING, "could not list nodes");
+        close(sock);
+        return NULL;
+    }
+
+    for(np = config; np; np = np->next) {
         int i;
-        int ssid_start;
-
-        /* Read a line. */
-        i = 0;
-        if(fgets(line, sizeof(line), fp) == NULL) {
-            break;
-        }
-
-        /* Skip whitespace. */
-        while(line[i] && isspace(line[i])) ++i;
-
-        /* If this is not an SSID skip this line. */
-        if(strncmp("nwid ", &line[i], 5)) {
-            continue;
-        }
-        i += 5;
-
-        /* Read the SSID. */
-        ssid_start = i;
-        while(line[i] && !isspace(line[i])) ++i;
-
-        /* See if this SSID matches one of ours. */
-        for(result = config; result; result = result->next) {
-            if(!strncmp(result->ssid, &line[ssid_start], i - ssid_start)) {
-                break;
+        for(i = 0; i < na.na_nodes; i++) {
+            if(     (nr[i].nr_flags & IEEE80211_NODEREQ_AP)
+                ||  (nr[i].nr_capinfo & IEEE80211_CAPINFO_IBSS)) {
+                printf("%s\n", nr[i].nr_nwid);
+                if(!strcmp(np->ssid, nr[i].nr_nwid)) {
+                    goto FoundMatch;
+                }
             }
         }
     }
-
-    pclose(fp);
-    return result;
+FoundMatch:
+    close(sock);
+    return np;
 }
 
 static void StartNetwork(Network *np)
@@ -254,12 +274,6 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* Parse initial config. */
-    config = LoadConfig();
-    if(config == NULL) {
-        return -1;
-    }
-
     /* Become a daemon. */
     if(!foreground) {
         pid_t pid;
@@ -281,7 +295,6 @@ int main(int argc, char *argv[])
 
         if(setsid() == -1) {
             perror("ERROR: setsid failed");
-            DestroyConfig(config);
             return -1;
         }
 
@@ -298,9 +311,17 @@ int main(int argc, char *argv[])
     signal(SIGTERM, HandleTerm);
     signal(SIGHUP, HandleHup);
 
+    /* Parse initial config. */
+    config = LoadConfig();
+    if(config == NULL) {
+        return -1;
+    }
+
     /* Process until we're told to stop. */
+    syslog(LOG_INFO, "started");
     while(!should_exit) {
         if(reload_config) {
+            syslog(LOG_INFO, "Reloading config");
             DestroyConfig(config);
             config = LoadConfig();
             if(config == NULL) {
@@ -310,19 +331,19 @@ int main(int argc, char *argv[])
         }
         if(CheckStatus()) {
             if(last_state != 1) {
-                syslog(LOG_INFO, "Network is up");
+                syslog(LOG_INFO, "%s is up", ifname);
                 last_state = 1;
             }
             sleep(1);
         } else {
             Network *np;
             if(last_state != 0) {
-                syslog(LOG_INFO, "Network is down");
+                syslog(LOG_INFO, "%s is down", ifname);
                 last_state = 0;
             }
             np = Scan(config);
             if(np) {
-                syslog(LOG_INFO, "Starting network %s", np->ssid);
+                syslog(LOG_INFO, "%s connecting to %s", ifname, np->ssid);
                 StartNetwork(np);
                 sleep(10);
             } else {
@@ -332,6 +353,7 @@ int main(int argc, char *argv[])
     }
 
     /* Normal shutdown. */
+    syslog(LOG_INFO, "exiting");
     DestroyConfig(config);
     return 0;
 }
