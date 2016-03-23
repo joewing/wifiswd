@@ -205,7 +205,6 @@ static Network *Scan(Network *config)
         for(i = 0; i < na.na_nodes; i++) {
             if(     (nr[i].nr_flags & IEEE80211_NODEREQ_AP)
                 ||  (nr[i].nr_capinfo & IEEE80211_CAPINFO_IBSS)) {
-                printf("%s\n", nr[i].nr_nwid);
                 if(!strcmp(np->ssid, nr[i].nr_nwid)) {
                     goto FoundMatch;
                 }
