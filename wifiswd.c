@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <ifaddrs.h>
 
+#include <netinet/in.h>
 #include <net/if.h>
 #include <net80211/ieee80211.h>
 #include <net80211/ieee80211_ioctl.h>
@@ -26,7 +27,7 @@ typedef struct Network {
 } Network;
 
 static const char START_TEMPLATE[] = "ifconfig %s nwid %s %s";
-static const char DHCP_TEMPLATE[] = "dhclient %s";
+static const char DHCP_TEMPLATE[] = "dhclient -q %s";
 
 static const char *ifname = "iwm0";
 static const char *config_file = "/etc/wireless.conf";
@@ -48,17 +49,17 @@ static Network *LoadConfig(void)
     /* Map the configuration file. */
     fd = open(config_file, O_RDONLY);
     if(fd < 0) {
-        syslog(LOG_ERR, "could not open %s", config_file);
+        syslog(LOG_ERR, "could not open %s: %m", config_file);
         return NULL;
     }
     if(fstat(fd, &sb) < 0) {
-        syslog(LOG_ERR, "could not stat %s", config_file);
+        syslog(LOG_ERR, "could not stat %s: %m", config_file);
         close(fd);
         return NULL;
     }
     config = mmap(NULL, sb.st_size, PROT_READ, MAP_SHARED, fd, 0);
     if(config == MAP_FAILED) {
-        syslog(LOG_ERR, "mmap failed for %s", config_file);
+        syslog(LOG_ERR, "mmap failed for %s: %m", config_file);
         close(fd);
         return NULL;
     }
@@ -125,10 +126,11 @@ static void SetFlag(int sock, int value)
 {
     struct ifreq ifr;
     int old_flags;
+
     bzero(&ifr, sizeof(ifr));
     strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
     if(ioctl(sock, SIOCGIFFLAGS, (caddr_t)&ifr, sizeof(ifr)) < 0) {
-        syslog(LOG_WARNING, "could not read flags");
+        syslog(LOG_WARNING, "could not read flags: %m");
         return;
     }
     old_flags = ifr.ifr_flags;
@@ -139,8 +141,7 @@ static void SetFlag(int sock, int value)
     }
     if(old_flags != ifr.ifr_flags) {
         if(ioctl(sock, SIOCSIFFLAGS, (caddr_t)&ifr) < 0) {
-            syslog(LOG_WARNING, "could not update flags");
-            return;
+            syslog(LOG_WARNING, "could not update flags: %m");
         }
     }
 }
@@ -149,20 +150,29 @@ static char CheckStatus(void)
 {
     struct ifaddrs *ifap;
     struct ifaddrs *ap;
-    char status = 0;
+    char is_up = 0;
+    char has_ip = 0;
     if(getifaddrs(&ifap) < 0) {
-        syslog(LOG_WARNING, "could not determine state of %s", ifname);
-        return status;
+        syslog(LOG_WARNING, "could not determine state of %s: %m", ifname);
+        return 0;
     }
     for(ap = ifap; ap; ap = ap->ifa_next) {
-        if(!strcmp(ifname, ap->ifa_name) && ap->ifa_data) {
-            struct if_data *ifd = (struct if_data*)ap->ifa_data;
-            status = LINK_STATE_IS_UP(ifd->ifi_link_state);
+        if(strcmp(ifname, ap->ifa_name)) {
+            continue;
+        }
+        if(ap->ifa_addr->sa_family == AF_LINK) {
+            const struct if_data *ifd = (struct if_data*)ap->ifa_data;
+            is_up = LINK_STATE_IS_UP(ifd->ifi_link_state);
+        } else if(ap->ifa_addr->sa_family == AF_INET) {
+            const struct sockaddr_in *addr = (struct sockaddr_in*)ap->ifa_addr;
+            has_ip = addr->sin_addr.s_addr != 0;
+        }
+        if(has_ip && is_up) {
             break;
         }
     }
     freeifaddrs(ifap);
-    return status;
+    return is_up && has_ip;
 }
 
 static Network *Scan(Network *config)
@@ -175,7 +185,7 @@ static Network *Scan(Network *config)
 
     sock = socket(AF_INET, SOCK_DGRAM, 0);
     if(sock < 0) {
-        syslog(LOG_WARNING, "could not scan (socket create failed)");
+        syslog(LOG_WARNING, "could not scan (socket create failed): %m");
         return NULL;
     }
 
@@ -184,7 +194,7 @@ static Network *Scan(Network *config)
     bzero(&ifr, sizeof(ifr));
     strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
     if(ioctl(sock, SIOCS80211SCAN, (caddr_t)&ifr) != 0) {
-        syslog(LOG_WARNING, "could not start scan");
+        syslog(LOG_WARNING, "could not start scan: %m");
         close(sock);
         return NULL;
     }
@@ -195,7 +205,7 @@ static Network *Scan(Network *config)
     na.na_size = sizeof(nr);
     strlcpy(na.na_ifname, ifname, sizeof(na.na_ifname));
     if(ioctl(sock, SIOCG80211ALLNODES, &na) != 0) {
-        syslog(LOG_WARNING, "could not list nodes");
+        syslog(LOG_WARNING, "could not list nodes: %m");
         close(sock);
         return NULL;
     }
@@ -212,6 +222,9 @@ static Network *Scan(Network *config)
         }
     }
 FoundMatch:
+
+    SetFlag(sock, -IFF_UP);
+
     close(sock);
     return np;
 }
@@ -225,6 +238,7 @@ static void StartNetwork(Network *np)
     command = malloc(len);
     snprintf(command, len, START_TEMPLATE, ifname, np->ssid, np->args);
     system(command);
+
     snprintf(command, len, DHCP_TEMPLATE, ifname);
     system(command);
     free(command);
