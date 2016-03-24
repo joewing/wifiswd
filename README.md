@@ -12,7 +12,7 @@ automatically in OpenBSD.  On startup and SIGHUP, it reads
 ```
 
 The first parameter is the SSID of the network and the rest of the line
-provides paramters to ifconfig(8).
+provides parameters to ifconfig(8).
 
 To start the daemon, run "wifiswd -i if0", where "if0" is the name of your
 interface.
