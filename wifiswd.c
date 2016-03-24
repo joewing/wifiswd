@@ -234,7 +234,12 @@ static void StartNetwork(Network *np)
     char *command;
     size_t len;
 
-    len = strlen(np->args) + strlen(np->ssid) + sizeof(START_TEMPLATE);
+    len = strlen(np->args) + strlen(np->ssid);
+    if(sizeof(START_TEMPLATE) > sizeof(DHCP_TEMPLATE)) {
+        len += sizeof(START_TEMPLATE);
+    } else {
+        len += sizeof(DHCP_TEMPLATE);
+    }
     command = malloc(len);
     snprintf(command, len, START_TEMPLATE, ifname, np->ssid, np->args);
     system(command);
@@ -315,10 +320,6 @@ int main(int argc, char *argv[])
             perror("ERROR: chdir failed");
             return -1;
         }
-
-        close(STDIN_FILENO);
-        close(STDOUT_FILENO);
-        close(STDERR_FILENO);
     }
     signal(SIGINT, HandleTerm);
     signal(SIGTERM, HandleTerm);
