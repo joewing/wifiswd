@@ -229,10 +229,25 @@ FoundMatch:
     return np;
 }
 
+static void StopNetwork()
+{
+    const int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if(sock < 0) {
+        syslog(LOG_WARNING, "could not stop device (socket create failed): %m");
+        return;
+    }
+
+    SetFlag(sock, -IFF_UP);
+
+    close(sock);
+}
+
 static void StartNetwork(Network *np)
 {
     char *command;
     size_t len;
+
+    StopNetwork();
 
     len = strlen(np->args) + strlen(np->ssid);
     if(sizeof(START_TEMPLATE) > sizeof(DHCP_TEMPLATE)) {
