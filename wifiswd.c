@@ -363,7 +363,6 @@ int main(int argc, char *argv[])
                 syslog(LOG_INFO, "%s is up", ifname);
                 last_state = 1;
             }
-            sleep(1);
         } else {
             Network *np;
             if(last_state != 0) {
@@ -374,11 +373,12 @@ int main(int argc, char *argv[])
             if(np) {
                 syslog(LOG_INFO, "%s connecting to %s", ifname, np->ssid);
                 StartNetwork(np);
-                sleep(10);
             } else {
-                sleep(5);
+                /* No known networks were found, so wait a while. */
+                sleep(10);
             }
         }
+        sleep(1);
     }
 
     /* Normal shutdown. */
