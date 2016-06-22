@@ -14,8 +14,10 @@ automatically in OpenBSD.  On startup and SIGHUP, it reads
 The first parameter is the SSID of the network and the rest of the line
 provides parameters to ifconfig(8).
 
-To start the daemon, run "wifiswd -i if0", where "if0" is the name of your
-interface.
+To start the daemon, run "wifiswd -d -i if0", where "if0" is the name of
+your interface.  Without the `-d` or `-f` option, wifiswd will exit once
+it connects.  Use the `-d` or `-f` option to run continuously and
+reconnect when the network is lost.
 
 Building
 --------
@@ -28,6 +30,7 @@ Usage
 usage: wifiswd [options]
 options:
    -c <file> The configuration file [/etc/wireless.conf]
+   -d        Run in the background
    -f        Run in foreground for debugging
    -h        Display this message
    -i <if>   The interface to use [iwm0]

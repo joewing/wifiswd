@@ -32,6 +32,7 @@ static const char DHCP_TEMPLATE[] = "dhclient -q %s";
 static const char *ifname = "iwm0";
 static const char *config_file = "/etc/wireless.conf";
 static char foreground = 0;
+static char background = 0;
 
 static volatile char should_exit = 0;
 static volatile char reload_config = 0;
@@ -279,6 +280,7 @@ static void ShowHelp(const char *name)
     fprintf(stderr, "usage: %s [options]\n", name);
     fprintf(stderr, "options:\n");
     fprintf(stderr, "   -c <file> The configuration file [%s]\n", config_file);
+    fprintf(stderr, "   -d        Run in the background\n");
     fprintf(stderr, "   -f        Run in foreground for debugging\n");
     fprintf(stderr, "   -h        Display this message\n");
     fprintf(stderr, "   -i <if>   The interface to use [%s]\n", ifname);
@@ -295,6 +297,9 @@ int main(int argc, char *argv[])
         case 'c':
             config_file = optarg;
             break;
+        case 'd':
+            background = 1;
+            break;
         case 'f':
             foreground = 1;
             break;
@@ -308,7 +313,7 @@ int main(int argc, char *argv[])
     }
 
     /* Become a daemon. */
-    if(!foreground) {
+    if(background && !foreground) {
         pid_t pid;
 
         pid = fork();
@@ -362,6 +367,9 @@ int main(int argc, char *argv[])
             if(last_state != 1) {
                 syslog(LOG_INFO, "%s is up", ifname);
                 last_state = 1;
+            }
+            if(!(background || foreground)) {
+                should_exit = 1;
             }
         } else {
             Network *np;
